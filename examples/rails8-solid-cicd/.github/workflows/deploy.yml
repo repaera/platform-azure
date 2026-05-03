@@ -106,11 +106,22 @@ jobs:
           sed -i "s|ghcr.io/YOUR_GITHUB_USERNAME/rails-app:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}|g" manifests/deployment.yaml
           sed -i "s|ghcr.io/YOUR_GITHUB_USERNAME/rails-app:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}|g" manifests/worker-deployment.yaml
 
-      - name: Apply namespace and secrets
+      - name: Apply namespace
         run: |
           kubectl apply -f manifests/namespace.yaml
-          # Secrets applied manually or via External Secrets Operator
-          # kubectl apply -f manifests/secret.yaml
+
+      # OPTION A (Recommended): Doppler + External Secrets Operator
+      # Uncomment if using Doppler (default in install-manifests.sh):
+      # - name: Apply ExternalSecret from Doppler
+      #   run: |
+      #     kubectl apply -f manifests/external-secret.yaml
+
+      # OPTION B (Manual): Apply Kubernetes Secret directly
+      # Use this if you skipped Doppler (--skip-doppler) or prefer manual secrets.
+      # WARNING: Ensure secret.yaml values are injected at deploy time, never committed.
+      - name: Apply Kubernetes secrets
+        run: |
+          kubectl apply -f manifests/secret.yaml
 
       - name: Run database migrations
         # Skip migrations on rollback (safer — old migrations already ran)

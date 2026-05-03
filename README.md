@@ -1,6 +1,6 @@
-# k3s on Azure — Modular Compute Platform
+# Rancher + k3s on Azure
 
-A lean, modular Terraform template that provisions a **k3s compute cluster** on Azure. Designed for portability and flexibility: bring your own databases, caches, and search from any provider (Upstash, DigitalOcean, AWS, etc.), or self-host them inside k3s.
+Modular Terraform template that provisions a **k3s compute cluster** on Azure. Designed for portability and flexibility: bring your own databases, caches, and search from any provider (Upstash, DigitalOcean, AWS, etc.), or self-host them inside k3s.
 
 **Three deployment paths:**
 - **`environments/single/`** — One VM for dev / local testing (~$140/mo)
@@ -17,10 +17,12 @@ This template provisions **VMs, network, and load balancer**. Everything else is
 
 | Service | Default | Escape Hatches |
 |---------|---------|----------------|
-| **Ingress** | Traefik (self-hosted on k3s) | N/A |
-| **TLS** | cert-manager (self-hosted) | N/A |
-| **Redis** | Self-hosted StatefulSet on k3s | `--skip-redis` → Upstash / Azure Cache |
-| **OpenSearch** | Self-hosted StatefulSet on k3s | `--skip-opensearch` → Elastic Cloud / Meilisearch |
+| **Ingress** | Traefik (Helm) | N/A |
+| **TLS** | cert-manager v1.14.5 (Helm, pinned) | N/A |
+| **Storage** | Longhorn (Helm) | N/A |
+| **Secrets** | Doppler operator (Helm) | `--skip-doppler` → manual K8s Secrets |
+| **Redis** | Single-node via Bitnami Helm | `--skip-redis` → Upstash / Azure Cache |
+| **OpenSearch** | Single-node via Bitnami Helm | `--skip-opensearch` → Elastic Cloud / Meilisearch |
 | **PostgreSQL** | **BYO-DB** (no default) | Terraform `modules/datastore/postgres/` opt-in / managed provider |
 | **MySQL** | **BYO-DB** (no default) | Terraform `modules/datastore/mysql/` opt-in / managed provider |
 
@@ -34,9 +36,13 @@ This matches the minimal infrastructure philosophy: **own the compute layer, out
 ```
 1 × D4as_v5 VM (4 vCPU, 16 GB)
   ├─ k3s server
-  ├─ Traefik ingress
-  ├─ Redis StatefulSet (default, skippable)
-  ├─ OpenSearch StatefulSet (default, skippable)
+  ├─ Traefik (Helm)
+  ├─ cert-manager (Helm, pinned)
+  ├─ Longhorn (Helm)
+  ├─ Doppler (Helm)
+  ├─ Rancher (Helm)
+  ├─ Redis (Helm, skippable)
+  ├─ OpenSearch (Helm, skippable)
   └─ Your apps (Rails/Next.js/Go/Rust)
 
 No Azure Load Balancer (Traefik binds to VM public IP)
@@ -45,13 +51,16 @@ No Azure Load Balancer (Traefik binds to VM public IP)
 ### Multiple (HA) Path
 ```
 3 × D2as_v5 servers (2 vCPU, 8 GB) — etcd + control plane
-  ├─ Traefik ingress
-  ├─ Doppler Operator
+  ├─ Traefik (Helm)
+  ├─ cert-manager (Helm, pinned)
+  ├─ Longhorn (Helm)
+  ├─ Doppler (Helm)
+  ├─ Rancher (Helm)
   └─ Monitoring
 
 1+ × D4as_v5 agents (4 vCPU, 16 GB) — workers, scalable
-  ├─ Redis StatefulSet (default, skippable)
-  ├─ OpenSearch StatefulSet (default, skippable)
+  ├─ Redis (Helm, skippable)
+  ├─ OpenSearch (Helm, skippable)
   └─ Your apps
 
 Azure Load Balancer (Standard)
@@ -92,10 +101,9 @@ Azure Load Balancer (Standard)
 │       └── terraform.tfvars.example
 ├── scripts/
 │   ├── k3sup-init.sh           # Bootstrap first node
-│   └── install-manifests.sh    # Install Traefik + cert-manager + Redis + OpenSearch + optional DB
+│   └── install-manifests.sh    # Install all core infrastructure via Helm
 ├── manifests/
-│   ├── redis/                  # Redis StatefulSet (Longhorn PVC)
-│   └── opensearch/             # OpenSearch StatefulSet (Longhorn PVC)
+│   └── doppler/                # Doppler ClusterSecretStore + ExternalSecret examples
 ├── examples/
 │   ├── rails8-solid-cicd/      # Rails 8 + GitHub Actions CI/CD to k3s
 │   │   ├── Dockerfile
@@ -122,7 +130,7 @@ Azure Load Balancer (Standard)
 | Terraform | Provision all Azure infrastructure           | HashiCorp apt repo |
 | k3sup     | Install k3s on VMs over SSH                  | `curl -sLS https://get.k3sup.dev \| sh && sudo mv k3sup /usr/local/bin/` |
 | kubectl   | Talk to the cluster                          | Latest release binary |
-| helm      | Install Traefik, cert-manager, optional DBs  | `curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \| bash` |
+| helm      | Install ALL infrastructure (required)        | `curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \| bash` |
 
 Terraform install via HashiCorp apt repo:
 
@@ -251,19 +259,34 @@ kubectl get nodes
 
 ---
 
-## Step 5 — Install Cluster Manifests
+## Step 5 — Install Core Infrastructure (One Script, All Helm)
+
+A single script installs the entire stack. Every component is deployed via Helm — no raw YAML, no `kubectl apply -f`.
 
 ```bash
-# Default: installs Traefik + cert-manager + Redis + OpenSearch
 ../../scripts/install-manifests.sh
 ```
 
-### Options
+This installs, in order:
+
+| # | Component | Chart | Namespace | Notes |
+|---|-----------|-------|-----------|-------|
+| 1 | **Traefik** | `traefik/traefik` | `traefik` | Ingress controller, LoadBalancer service |
+| 2 | **cert-manager** | `jetstack/cert-manager` | `cert-manager` | Pinned to `v1.14.5`, auto-installs CRDs |
+| 3 | **Longhorn** | `longhorn/longhorn` | `longhorn-system` | Distributed block storage for all PVCs |
+| 4 | **Doppler** | `doppler/doppler-kubernetes-operator` | `doppler-operator-system` | Secrets sync from doppler.com |
+| 5 | **Rancher** | `rancher-stable/rancher` | `cattle-system` | Cluster UI, always installed |
+| 6 | **Redis** | `bitnami/redis` | `redis` | Single-node, upgradeable to replication |
+| 7 | **OpenSearch** | `bitnami/opensearch` | `opensearch` | Single-node, standalone mode |
+| 8 | **Database** (optional) | `bitnami/postgresql` or `bitnami/mysql` | `database` | Only if `--db-provider` specified |
+
+### Flags
 
 | Flag | Effect |
 |------|--------|
-| `--skip-redis` | Skip self-hosted Redis (use Upstash, etc.) |
-| `--skip-opensearch` | Skip self-hosted OpenSearch (use Elastic Cloud, etc.) |
+| `--skip-redis` | Skip Redis (use Upstash, Azure Cache, etc.) |
+| `--skip-opensearch` | Skip OpenSearch (use managed search) |
+| `--skip-doppler` | Skip Doppler operator (use manual K8s Secrets) |
 | `--db-provider=postgres` | Self-host PostgreSQL inside k3s (budget option) |
 | `--db-provider=mysql` | Self-host MySQL inside k3s (budget option) |
 | `--db-provider=none` | Default. Use BYO-DB via Doppler / K8s Secrets |
@@ -271,31 +294,94 @@ kubectl get nodes
 Examples:
 
 ```bash
-# Default (self-hosted Redis + OpenSearch, no DB)
+# Full stack (Traefik, cert-manager, Longhorn, Doppler, Rancher, Redis, OpenSearch)
 ../../scripts/install-manifests.sh
 
-# Skip Redis, use Upstash instead
-../../scripts/install-manifests.sh --skip-redis
-
-# Skip everything stateful, pure compute
+# Skip Redis and OpenSearch, use managed services
 ../../scripts/install-manifests.sh --skip-redis --skip-opensearch
+
+# Skip Doppler, use manual Kubernetes Secrets
+../../scripts/install-manifests.sh --skip-doppler
 
 # Budget option: self-host PostgreSQL too
 ../../scripts/install-manifests.sh --db-provider=postgres --postgres-password=strongpass
 ```
 
+### Why All Helm?
+
+- **Version pinning:** cert-manager is pinned to `v1.14.5` for reproducibility
+- **Upgrade safety:** `helm upgrade --install` is idempotent — safe to re-run
+- **Rollback:** `helm rollback` if a component upgrade breaks
+- **Values-driven:** All configuration in one place (the script), no scattered YAML files
+
 ---
 
-## Step 6 — Wire Your Database
+## Step 6 — Configure Doppler (Recommended)
+
+Doppler is installed by default. It syncs secrets from [doppler.com](https://doppler.com) into your cluster automatically.
+
+### 1. Get Your Service Token
+
+1. Go to [doppler.com](https://dashboard.doppler.com) → your project → **Service Tokens**
+2. Create a token (e.g., `k3s-production`)
+3. Copy the token (looks like `dp.st.xxx...`)
+
+### 2. Create the Kubernetes Secret
+
+```bash
+kubectl create secret generic doppler-token-secret \
+  --namespace doppler-operator-system \
+  --from-literal=serviceToken=dp.st.YOUR_TOKEN_HERE
+```
+
+### 3. Apply the ClusterSecretStore
+
+```bash
+kubectl apply -f ../../manifests/doppler/cluster-secret-store.yaml
+```
+
+### 4. Use ExternalSecret in Your Apps
+
+Instead of manually creating secrets, your app manifests use an `ExternalSecret`:
+
+```yaml
+# In your app's manifests/ directory
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: rails-app-secrets
+  namespace: rails-app
+spec:
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: doppler-secret-store
+  target:
+    name: rails-app-secrets
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: production  # Your Doppler config name
+```
+
+See `manifests/doppler/external-secret-example.yaml` for a complete example.
+
+### Skipping Doppler
+
+If you prefer manual secrets, run the install script with `--skip-doppler` and use standard Kubernetes `Secret` resources instead.
+
+---
+
+## Step 7 — Wire Your Database
 
 ### Option A: Managed Service (Recommended)
 
-Provision PostgreSQL/MySQL at any provider (Upstash, DigitalOcean, AWS RDS, etc.).
-Inject the connection string into your apps via:
+Provision PostgreSQL/MySQL at any provider (Upstash, DigitalOcean, AWS RDS, Azure, etc.).
 
-- **Doppler** (recommended — runtime secret injection)
-- **Kubernetes Secret** + External Secrets Operator
-- **Rancher UI** → Project Secrets
+Inject the connection string via:
+
+- **Doppler** (recommended — auto-syncs to your cluster)
+- **Kubernetes Secret** (manual — see `examples/rails8-solid-cicd/manifests/secret.yaml`)
+- **Rancher UI** → Project Secrets (click-to-create)
 
 ### Option B: Terraform Opt-In
 
@@ -316,34 +402,35 @@ Use the install script's `--db-provider` flag. This deploys a database via Helm 
 
 ---
 
-## Step 7 — Install Rancher (Optional)
+## Step 8 — Access Rancher
+
+Rancher is installed automatically in Step 5. After the Traefik LoadBalancer gets an IP:
 
 ```bash
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-kubectl rollout status deployment/cert-manager -n cert-manager
+# Get the LB IP
+LB_IP=$(terraform output -raw load_balancer_ip)
+# Or for single-node: LB_IP=$(terraform output -raw vm_public_ip)
 
-helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
-helm repo update
-
-# For single-node, use the VM public IP
-# For multiple, use the LB IP
-LB_IP=$(terraform output -raw load_balancer_ip)  # or vm_public_ip for single
-
-helm install rancher rancher-stable/rancher \
+# Update Rancher hostname (patch the existing ingress)
+helm upgrade rancher rancher-stable/rancher \
   --namespace cattle-system \
-  --create-namespace \
-  --set hostname=${LB_IP}.nip.io \
-  --set bootstrapPassword=<choose-a-strong-password> \
-  --set replicas=3
+  --set hostname=${LB_IP}.nip.io
 
-kubectl rollout status deployment/rancher -n cattle-system
+# Or patch the existing ingress directly:
+# kubectl patch ingress rancher -n cattle-system \
+#   --type merge \
+#   -p '{"spec":{"rules":[{"host":"'${LB_IP}'.nip.io"}]}}'
 ```
 
 Access: `https://${LB_IP}.nip.io`
 
+Default credentials: `admin` / `admin`
+
+> **Security:** Change the bootstrap password immediately after first login. Go to **☰ → Users & Authentication** → edit `admin` user.
+
 ---
 
-## Step 8 — Deploy Your Rails 8 App (EXAMPLE)
+## Step 9 — Deploy Your Rails 8 App (EXAMPLE)
 
 This example demonstrates deploying a **Rails 8** application using the Solid Stack — no Redis or Elasticsearch required. All caching, queueing, and search run through PostgreSQL.
 
@@ -432,14 +519,35 @@ Then in GitHub:
 4. Value: Paste the long base64 string from above
 5. Click "Add secret"
 
-**4. Add application secrets to GitHub:**
+**4. Configure secrets (choose one path):**
+
+**Path A — Doppler (Recommended, default in install script)**
+
+No GitHub Secrets needed for database credentials. Add them to your [Doppler project](https://dashboard.doppler.com) instead:
+
+1. Go to Doppler Dashboard → your project → `production` config
+2. Add these secrets:
+
+| Secret Name | Value |
+|-------------|-------|
+| `DATABASE_URL` | `postgresql://user:pass@host:5432/dbname?sslmode=require` |
+| `RAILS_MASTER_KEY` | Output of `cat config/master.key` in your Rails app |
+| `RAILS_ENV` | `production` |
+| `RAILS_SERVE_STATIC_FILES` | `true` |
+| `SOLID_QUEUE_IN_PUMA` | `true` (single container) or omit (separate workers) |
+
+3. The workflow uses an `ExternalSecret` (see `manifests/doppler/external-secret-example.yaml`) that auto-syncs these to your cluster.
+
+**Path B — Manual Kubernetes Secrets (if you used `--skip-doppler`)**
+
+Add these as GitHub repository secrets (same method as `KUBECONFIG` above):
 
 | Secret Name | What It Is | Where to Get It |
 |-------------|-----------|-----------------|
-| `DATABASE_URL` | PostgreSQL connection string | Your managed DB provider (Upstash, DO, Azure) |
+| `DATABASE_URL` | PostgreSQL connection string | Your managed DB provider |
 | `RAILS_MASTER_KEY` | Encryption key for credentials | `cat config/master.key` in your Rails app |
 
-Add these the same way you added `KUBECONFIG`.
+The workflow applies `manifests/secret.yaml` directly.
 
 **5. Configure your Rails app:**
 
@@ -568,31 +676,9 @@ kubectl scale deployment rails-worker --replicas=3 -n rails-app
 
 ### Setup (One-Time)
 
-**1. Install Rancher on your cluster:**
+Rancher is already installed in Step 5. No additional setup needed.
 
-```bash
-# From Step 7 in this README
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-kubectl rollout status deployment/cert-manager -n cert-manager
-
-helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
-helm repo update
-
-LB_IP=$(terraform output -raw load_balancer_ip)
-
-helm install rancher rancher-stable/rancher \
-  --namespace cattle-system \
-  --create-namespace \
-  --set hostname=${LB_IP}.nip.io \
-  --set bootstrapPassword=your-strong-password \
-  --set replicas=1  # use 1 for single-node, 3 for HA
-
-kubectl rollout status deployment/rancher -n cattle-system
-```
-
-Access Rancher at `https://${LB_IP}.nip.io`
-
-**2. Copy the example Dockerfile:**
+**1. Copy the example Dockerfile:**
 
 ```bash
 cp examples/rails8-solid-rancher/Dockerfile your-rails-app/
@@ -600,7 +686,7 @@ cp examples/rails8-solid-rancher/.dockerignore your-rails-app/
 cp examples/rails8-solid-rancher/config/* your-rails-app/config/
 ```
 
-**3. Configure your Rails app:**
+**2. Configure your Rails app:**
 
 Same as Path A: install `solid_cache`, `solid_queue`, add Puma plugin, configure database.yml.
 
@@ -794,7 +880,7 @@ bin/rails db:migrate
 | 3 × Public IPs | Standard | ~$11 |
 | **Total** | | **~$175/mo** |
 
-**External services** (not included above):
+**Optional managed alternatives** (if you used `--skip-redis`, `--skip-opensearch`, or `--db-provider=none`):
 - Upstash Redis: free tier → ~$20/mo
 - DigitalOcean PostgreSQL: ~$15/mo
 - Elastic Cloud: ~$200+/mo (or skip/searchless)
