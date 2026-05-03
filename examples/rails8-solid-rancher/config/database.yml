@@ -1,0 +1,19 @@
+# Rails 8 production database configuration for Rancher UI deployment.
+# Copy this into your Rails app's config/database.yml (production section).
+
+production:
+  adapter: postgresql
+  encoding: unicode
+  # Use DATABASE_URL from environment (managed PostgreSQL or self-hosted)
+  url: <%= ENV["DATABASE_URL"] %>
+  # Fallback pool size; adjust based on Puma workers + threads
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS", 5).to_i %>
+  # SSL required for managed DBs (Upstash, Azure, DigitalOcean)
+  sslmode: require
+  # Connection timeout
+  connect_timeout: 2
+  # Statement timeout (prevent runaway queries)
+  statement_timeout: 30000 # 30 seconds
+  # Solid Trifecta uses the same DB for cache and queue — no separate Redis needed
+  # Solid Cache: uses cache_* tables in this database
+  # Solid Queue: uses queue_* tables in this database

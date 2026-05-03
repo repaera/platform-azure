@@ -1,0 +1,53 @@
+# Docker build context exclusions
+# Keep image small by excluding files not needed at runtime
+
+.git
+.gitignore
+.gitattributes
+
+# Development / test files
+.env*
+.env.local
+.env.development
+.env.test
+docker-compose*.yml
+Dockerfile*
+
+# Rails temporary files
+tmp/
+log/
+storage/
+node_modules/
+
+# Documentation
+*.md
+README*
+LICENSE*
+CHANGELOG*
+
+# CI/CD configs (not needed in image)
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Ruby
+vendor/bundle/ruby/*/cache/
+.bundle/
+
+# Test coverage
+coverage/
+
+# Local overrides
+config/master.key
+config/credentials.yml.enc

@@ -1,0 +1,140 @@
+name: Deploy Rails 8 App to k3s
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Rollback: Deploy a specific image tag (e.g., abc1234). Leave empty to build and deploy latest.'
+        required: false
+        default: ''
+      skip_migrations:
+        description: 'Skip database migrations (checked automatically on rollback).'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    # Skip build if rolling back to a specific image tag
+    if: github.event.inputs.image_tag == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,suffix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    # For normal deploys: needs build. For rollback: runs independently.
+    needs: ${{ github.event.inputs.image_tag == '' && 'build' || '' }}
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: latest
+
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          # Your KUBECONFIG is stored as a GitHub Secret (base64 encoded).
+          # To get it, run on your management machine after k3sup install:
+          #   cat kubeconfig | base64 -w 0
+          # Then paste the output into GitHub Secret named KUBECONFIG
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            echo "TAG=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+            echo "ROLLBACK=true" >> $GITHUB_OUTPUT
+            echo "Rolling back to image tag: ${{ github.event.inputs.image_tag }}"
+          else
+            TAG=$(echo ${{ github.sha }} | cut -c1-7)
+            echo "TAG=$TAG" >> $GITHUB_OUTPUT
+            echo "ROLLBACK=false" >> $GITHUB_OUTPUT
+            echo "Deploying new image tag: $TAG"
+          fi
+
+      - name: Update image tag in manifests
+        run: |
+          sed -i "s|ghcr.io/YOUR_GITHUB_USERNAME/rails-app:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}|g" manifests/migrate-job.yaml
+          sed -i "s|ghcr.io/YOUR_GITHUB_USERNAME/rails-app:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}|g" manifests/deployment.yaml
+          sed -i "s|ghcr.io/YOUR_GITHUB_USERNAME/rails-app:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }}|g" manifests/worker-deployment.yaml
+
+      - name: Apply namespace and secrets
+        run: |
+          kubectl apply -f manifests/namespace.yaml
+          # Secrets applied manually or via External Secrets Operator
+          # kubectl apply -f manifests/secret.yaml
+
+      - name: Run database migrations
+        # Skip migrations on rollback (safer — old migrations already ran)
+        if: steps.tag.outputs.ROLLBACK == 'false' && !inputs.skip_migrations
+        run: |
+          kubectl apply -f manifests/migrate-job.yaml
+          kubectl wait --for=condition=complete job/rails-db-migrate --timeout=300s
+          kubectl logs job/rails-db-migrate
+
+      - name: Deploy web application
+        run: |
+          kubectl apply -f manifests/deployment.yaml
+          kubectl apply -f manifests/service.yaml
+          kubectl apply -f manifests/ingress.yaml
+          kubectl rollout status deployment/rails-app -n rails-app --timeout=300s
+
+      - name: Deploy workers (optional)
+        run: |
+          # Uncomment the next two lines if using separate worker pods
+          # kubectl apply -f manifests/worker-deployment.yaml
+          # kubectl rollout status deployment/rails-worker -n rails-app --timeout=300s
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n rails-app
+          kubectl get svc -n rails-app
+          kubectl get ingress -n rails-app

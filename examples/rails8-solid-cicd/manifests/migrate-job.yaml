@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rails-db-migrate
+  namespace: rails-app
+  labels:
+    app.kubernetes.io/name: rails-app
+    app.kubernetes.io/component: migration
+spec:
+  # Clean up after 24 hours
+  ttlSecondsAfterFinished: 86400
+  # Retry failed migrations twice
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: ghcr.io/YOUR_GITHUB_USERNAME/rails-app:latest
+          command: ["bundle", "exec", "rails", "db:migrate"]
+          envFrom:
+            - secretRef:
+                name: rails-app-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+      activeDeadlineSeconds: 300

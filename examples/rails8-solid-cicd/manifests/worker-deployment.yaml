@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rails-worker
+  namespace: rails-app
+  labels:
+    app.kubernetes.io/name: rails-worker
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: rails-app
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rails-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rails-worker
+        app.kubernetes.io/component: worker
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/YOUR_GITHUB_USERNAME/rails-app:latest
+          # Override default command to run Solid Queue worker instead of Puma
+          command: ["bin/rails", "solid_queue:start"]
+          envFrom:
+            - secretRef:
+                name: rails-app-secrets
+          env:
+            - name: RAILS_ENV
+              value: "production"
+            # Ensure SOLID_QUEUE_IN_PUMA is NOT set (or explicitly false)
+            # This prevents the worker from trying to start Puma
+            - name: SOLID_QUEUE_IN_PUMA
+              value: "false"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+      terminationGracePeriodSeconds: 30

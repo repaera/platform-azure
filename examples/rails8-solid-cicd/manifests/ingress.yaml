@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rails-app
+  namespace: rails-app
+  annotations:
+    # Traefik automatically handles these annotations
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    # cert-manager integration (uncomment if using cluster issuer):
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: your-domain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rails-app
+                port:
+                  number: 80
+  # TLS configuration (cert-manager):
+  # tls:
+  #   - hosts:
+  #       - your-domain.com
+  #     secretName: your-domain-tls

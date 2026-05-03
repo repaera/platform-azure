@@ -1,0 +1,58 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored and never committed.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+
+# Short identifier used as a prefix in all resource names.
+# Use lowercase letters, numbers, and hyphens only.
+project = "your-project"
+
+# --- SSH KEY SETUP ---
+# Generate a dedicated key pair for infrastructure access (do NOT use your personal key):
+#   ssh-keygen -t ed25519 -C "platform-azure-infra" -f ~/.ssh/platform-azure-infra
+#
+# The private key (~/.ssh/platform-azure-infra) is used by k3sup to SSH into nodes.
+# The public key is injected into all VMs for admin access.
+# NEVER commit the private key to git.
+ssh_public_key_path = "~/.ssh/platform-azure-infra.pub"
+
+# Your public IP in CIDR notation. SSH access is locked to this address.
+# Find your IP: curl ifconfig.me
+# Then append /32:  "203.0.113.10/32"
+allowed_ssh_cidr = "YOUR_IP/32"
+
+# CIDR allowed to access K8s API (6443) and Rancher dashboard (8443).
+# Defaults to allowed_ssh_cidr if not set. Use the same value for simplicity.
+management_cidr = ""
+
+# Azure region. East US is among the cheapest Azure regions.
+location = "eastus"
+
+# VM size for the single node. D4as_v5 = 4 vCPU, 16GB RAM.
+# Enough for 5-8 apps + self-hosted Redis + OpenSearch.
+vm_size = "Standard_D4as_v5"
+
+# --- DATABASES (Bring Your Own) ---
+# This template does NOT provision managed databases by default.
+# You have three options for your apps:
+#
+# 1. MANAGED (Recommended for production):
+#    Use Upstash (Redis), DigitalOcean PostgreSQL, AWS RDS, etc.
+#    Inject credentials via Doppler or Kubernetes Secrets.
+#
+# 2. TERRAFORM OPT-IN:
+#    Add `module.postgres_shared` or `module.mysql_shared` to main.tf
+#    and set variables. See modules/postgres/ and modules/mysql/ for examples.
+#
+# 3. SELF-HOSTED (Budget option):
+#    Run the install script with --db-provider=postgres or --db-provider=mysql
+#    to deploy a database inside k3s via Helm.
+#    WARNING: Not recommended for production data.
+#
+#   ./scripts/install-manifests.sh --db-provider=postgres --postgres-password=strongpass
+
+# Optional: extra tags merged with project/environment/managed_by.
+# tags = {
+#   cost_center = "engineering"
+#   owner       = "yourname"
+# }
