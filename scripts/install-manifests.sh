@@ -19,6 +19,9 @@
 #   --db-provider=TYPE     Install self-hosted DB: postgres, mysql, or none (default)
 #   --postgres-password    Required when --db-provider=postgres
 #   --mysql-password       Required when --db-provider=mysql
+#   --rancher-hostname     Custom domain for Rancher (e.g., rancher.yourdomain.com)
+#                          If omitted, Rancher uses a placeholder hostname.
+#                          Update DNS A-record to point to your LB IP before accessing.
 #   --help                 Show this help
 
 set -euo pipefail
@@ -32,6 +35,7 @@ INSTALL_DOPPLER=true
 DB_PROVIDER="none"
 POSTGRES_PASSWORD=""
 MYSQL_PASSWORD=""
+RANCHER_HOSTNAME=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,8 +67,16 @@ while [[ $# -gt 0 ]]; do
       MYSQL_PASSWORD="$2"
       shift 2
       ;;
+    --rancher-hostname=*)
+      RANCHER_HOSTNAME="${1#*=}"
+      shift
+      ;;
+    --rancher-hostname)
+      RANCHER_HOSTNAME="$2"
+      shift 2
+      ;;
     --help)
-      head -n 28 "$0" | tail -n 27
+      head -n 31 "$0" | tail -n 30
       exit 0
       ;;
     *)
@@ -74,6 +86,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Helper: skip if Helm release already deployed
+helm_install_or_upgrade() {
+  local release=$1 namespace=$2
+  shift 2
+  if helm status "$release" -n "$namespace" >/dev/null 2>&1; then
+    echo "[skip] $release already installed in $namespace. Using helm upgrade..."
+  fi
+  helm upgrade --install "$release" "$@"
+}
 
 # Add all Helm repos once
 echo "[init] Adding Helm repositories..."
@@ -87,7 +109,7 @@ helm repo update
 
 # Step 1: Traefik
 echo "[1/8] Installing Traefik (ingress controller)..."
-helm upgrade --install traefik traefik/traefik \
+helm_install_or_upgrade traefik traefik traefik/traefik \
   --namespace traefik \
   --create-namespace \
   --set service.type=LoadBalancer
@@ -95,7 +117,7 @@ helm upgrade --install traefik traefik/traefik \
 # Step 2: cert-manager (pinned version)
 CERT_MANAGER_VERSION="v1.14.5"
 echo "[2/8] Installing cert-manager ${CERT_MANAGER_VERSION} (TLS certificates)..."
-helm upgrade --install cert-manager jetstack/cert-manager \
+helm_install_or_upgrade cert-manager cert-manager jetstack/cert-manager \
   --namespace cert-manager \
   --create-namespace \
   --version "${CERT_MANAGER_VERSION}" \
@@ -105,7 +127,7 @@ kubectl rollout status deployment/cert-manager -n cert-manager --timeout=180s
 
 # Step 3: Longhorn
 echo "[3/8] Installing Longhorn (distributed storage)..."
-helm upgrade --install longhorn longhorn/longhorn \
+helm_install_or_upgrade longhorn longhorn-system longhorn/longhorn \
   --namespace longhorn-system \
   --create-namespace \
   --set defaultSettings.defaultDataPath=/var/lib/longhorn \
@@ -116,7 +138,7 @@ kubectl rollout status deployment/longhorn-ui -n longhorn-system --timeout=180s 
 # Step 4: Doppler (default — secrets management)
 if [[ "$INSTALL_DOPPLER" == true ]]; then
   echo "[4/8] Installing Doppler Secrets Operator..."
-  helm upgrade --install doppler-operator doppler/doppler-kubernetes-operator \
+  helm_install_or_upgrade doppler-operator doppler-operator-system doppler/doppler-kubernetes-operator \
     --namespace doppler-operator-system \
     --create-namespace
   echo "[info] Doppler installed. To configure:"
@@ -131,21 +153,44 @@ fi
 
 # Step 5: Rancher (always — this is the k3s + Rancher stack)
 echo "[5/8] Installing Rancher (cluster UI)..."
-helm upgrade --install rancher rancher-stable/rancher \
+
+# Generate a random bootstrap password (16 chars alphanumeric)
+RANCHER_PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 16)
+
+# Save credentials to a local file for retrieval
+PASSWORD_FILE="${SCRIPT_DIR}/../rancher-bootstrap-password.txt"
+echo "$RANCHER_PASSWORD" > "$PASSWORD_FILE"
+chmod 600 "$PASSWORD_FILE"
+
+# Use provided hostname or placeholder
+if [[ -n "$RANCHER_HOSTNAME" ]]; then
+  RANCHER_HOSTNAME_FINAL="$RANCHER_HOSTNAME"
+  echo "[info] Using custom hostname: $RANCHER_HOSTNAME_FINAL"
+else
+  RANCHER_HOSTNAME_FINAL="rancher.local"
+  echo "[warning] No --rancher-hostname provided. Using placeholder 'rancher.local'."
+  echo "          Update DNS and re-run with --rancher-hostname=yourdomain.com"
+fi
+
+# Save hostname for reference
+HOSTNAME_FILE="${SCRIPT_DIR}/../rancher-hostname.txt"
+echo "$RANCHER_HOSTNAME_FINAL" > "$HOSTNAME_FILE"
+
+helm_install_or_upgrade rancher cattle-system rancher-stable/rancher \
   --namespace cattle-system \
   --create-namespace \
-  --set hostname=rancher.local \
-  --set bootstrapPassword=admin \
+  --set hostname="$RANCHER_HOSTNAME_FINAL" \
+  --set bootstrapPassword="$RANCHER_PASSWORD" \
   --set replicas=1
 
-echo "[info] Rancher installed. After Traefik LB gets an IP, update hostname:"
-echo "       kubectl patch ingress rancher -n cattle-system -p \\"
-echo "         '{\"spec\":{\"rules\":[{\"host\":\"<your-lb-ip>.nip.io\"}]}}'"
+echo "[saved] Rancher bootstrap password written to: rancher-bootstrap-password.txt"
+echo "[saved] Rancher hostname written to: rancher-hostname.txt"
+echo "[security] Change this password immediately after first login."
 
 # Step 6: Redis (single-node default)
 if [[ "$INSTALL_REDIS" == true ]]; then
   echo "[6/8] Installing Redis (single-node, Bitnami)..."
-  helm upgrade --install redis bitnami/redis \
+  helm_install_or_upgrade redis redis bitnami/redis \
     --namespace redis \
     --create-namespace \
     --set architecture=standalone \
@@ -166,7 +211,7 @@ fi
 # Step 7: OpenSearch (Bitnami, single-node)
 if [[ "$INSTALL_OPENSEARCH" == true ]]; then
   echo "[7/8] Installing OpenSearch (single-node, Bitnami)..."
-  helm upgrade --install opensearch bitnami/opensearch \
+  helm_install_or_upgrade opensearch opensearch bitnami/opensearch \
     --namespace opensearch \
     --create-namespace \
     --set mode=standalone \
@@ -189,7 +234,7 @@ case "$DB_PROVIDER" in
       exit 1
     fi
     echo "[8/8] Installing PostgreSQL (self-hosted via Helm)..."
-    helm upgrade --install postgres bitnami/postgresql \
+    helm_install_or_upgrade postgres database bitnami/postgresql \
       --namespace database \
       --create-namespace \
       --set auth.postgresPassword="$POSTGRES_PASSWORD" \
@@ -205,7 +250,7 @@ case "$DB_PROVIDER" in
       exit 1
     fi
     echo "[8/8] Installing MySQL (self-hosted via Helm)..."
-    helm upgrade --install mysql bitnami/mysql \
+    helm_install_or_upgrade mysql database bitnami/mysql \
       --namespace database \
       --create-namespace \
       --set auth.rootPassword="$MYSQL_PASSWORD" \
@@ -230,5 +275,11 @@ echo ""
 echo "Next steps:"
 echo "  1. Get Traefik LB IP:  kubectl get svc -n traefik"
 echo "  2. Configure Doppler:   see manifests/doppler/"
-echo "  3. Access Rancher:      https://<lb-ip>.nip.io (bootstrapPassword: admin)"
-echo "  4. Deploy your app:     see examples/rails8-solid-cicd/"
+echo "  3. Rancher password:    cat rancher-bootstrap-password.txt"
+echo "  4. Rancher hostname:    cat rancher-hostname.txt"
+echo "  5. Access Rancher:      https://<your-rancher-hostname> (after DNS is set)"
+echo "  6. Deploy your app:     see examples/rails8-solid-cicd/"
+echo ""
+echo "Important: If you didn't provide --rancher-hostname, set up DNS now:"
+echo "  - Create A-record: rancher.yourdomain.com → <your-LB-IP>"
+echo "  - Re-run: ../../scripts/install-manifests.sh --rancher-hostname=rancher.yourdomain.com"

@@ -73,3 +73,9 @@ variable "lb_pool_id" {
   type        = string
   default     = ""
 }
+
+variable "os_disk_type" {
+  description = "OS disk storage account type. Premium_LRS for production, Standard_LRS for dev/cost savings."
+  type        = string
+  default     = "Premium_LRS"
+}

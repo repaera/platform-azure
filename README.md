@@ -69,6 +69,15 @@ Azure Load Balancer (Standard)
   └─ K8s API probe → 6443
 ```
 
+> **Warning — Longhorn on Control Plane Nodes (HA path):**
+> In the default HA topology, Longhorn storage runs on the 3 server VMs alongside etcd. Storage I/O competes with etcd's latency-sensitive consensus traffic.
+>
+> **If you plan to run stateful workloads (databases, caches, search):**
+> - Increase server SKU to `Standard_D4as_v5` (4 vCPU, 16 GB) minimum
+> - Or constrain Longhorn to agent nodes only (advanced: add `nodeSelector` to Longhorn Helm values)
+>
+> For dev/staging with minimal state: `D2as_v5` is acceptable.
+
 ---
 
 ## Directory Structure
@@ -404,29 +413,63 @@ Use the install script's `--db-provider` flag. This deploys a database via Helm 
 
 ## Step 8 — Access Rancher
 
-Rancher is installed automatically in Step 5. After the Traefik LoadBalancer gets an IP:
+Rancher is installed automatically in Step 5 with a **randomly generated bootstrap password** and a **custom domain** (provided via `--rancher-hostname` flag).
+
+### Prerequisites: DNS Setup
+
+Before accessing Rancher, point your domain's A-record to the Load Balancer IP:
 
 ```bash
 # Get the LB IP
 LB_IP=$(terraform output -raw load_balancer_ip)
 # Or for single-node: LB_IP=$(terraform output -raw vm_public_ip)
 
-# Update Rancher hostname (patch the existing ingress)
-helm upgrade rancher rancher-stable/rancher \
-  --namespace cattle-system \
-  --set hostname=${LB_IP}.nip.io
-
-# Or patch the existing ingress directly:
-# kubectl patch ingress rancher -n cattle-system \
-#   --type merge \
-#   -p '{"spec":{"rules":[{"host":"'${LB_IP}'.nip.io"}]}}'
+# Create DNS A-record: rancher.yourdomain.com → $LB_IP
 ```
 
-Access: `https://${LB_IP}.nip.io`
+### Install Rancher with Your Domain
 
-Default credentials: `admin` / `admin`
+```bash
+../../scripts/install-manifests.sh --rancher-hostname=rancher.yourdomain.com
+```
 
-> **Security:** Change the bootstrap password immediately after first login. Go to **☰ → Users & Authentication** → edit `admin` user.
+### Retrieve Credentials
+
+After installation, the script saves credentials to local files:
+
+```bash
+# Bootstrap password (randomly generated, 16 characters)
+cat rancher-bootstrap-password.txt
+
+# Configured hostname
+cat rancher-hostname.txt
+```
+
+### Access Rancher
+
+```bash
+RANCHER_HOST=$(cat rancher-hostname.txt)
+RANCHER_PASS=$(cat rancher-bootstrap-password.txt)
+echo "https://$RANCHER_HOST"
+echo "Password: $RANCHER_PASS"
+```
+
+Open `https://rancher.yourdomain.com` in your browser, log in with the bootstrap password, and **change it immediately**.
+
+> **Security:**
+> - The bootstrap password is randomly generated and saved to `rancher-bootstrap-password.txt` (chmod 600)
+> - Change the password after first login: **☰ → Users & Authentication → Edit `admin` user**
+> - Never use the default `admin`/`admin` or `nip.io` hostnames in production — both leak infrastructure details
+
+### Re-Configuring Hostname
+
+If you need to change the hostname later:
+
+```bash
+helm upgrade rancher rancher-stable/rancher \
+  --namespace cattle-system \
+  --set hostname=newrancher.yourdomain.com
+```
 
 ---
 
@@ -709,8 +752,8 @@ docker push ghcr.io/YOUR_USERNAME/rails-app:v1
 
 **2. Open Rancher and create your app:**
 
-1. Open `https://<your-lb-ip>.nip.io` in your browser
-2. Log in with the bootstrap password
+1. Open `https://rancher.yourdomain.com` in your browser (the domain you set in `--rancher-hostname`)
+2. Log in with the bootstrap password from `rancher-bootstrap-password.txt`
 3. Click **☰ (hamburger menu) → Workloads → Deployments**
 4. Click **Create**
 
@@ -934,6 +977,45 @@ module "postgres_shared" {
 
 Add variables and re-apply.
 
+### Upgrade Self-Hosted Services to HA Mode
+
+Redis and OpenSearch default to single-node for cost savings. When you outgrow them:
+
+#### Upgrade Redis to Master-Replica
+
+When single-node Redis restarts cause visible app slowdowns:
+
+```bash
+helm upgrade redis bitnami/redis \
+  --namespace redis \
+  --set architecture=replication \
+  --set auth.enabled=false \
+  --set master.persistence.storageClass=longhorn \
+  --set master.persistence.size=5Gi \
+  --set replica.replicaCount=1 \
+  --set replica.persistence.storageClass=longhorn \
+  --set replica.persistence.size=5Gi
+```
+
+**Impact:** 2 pods (1 master + 1 replica), ~1 GB RAM total. Data migrates automatically. Failover is automatic if the master pod fails.
+
+#### Upgrade OpenSearch to Cluster Mode
+
+For high search throughput or datasets >10 GB:
+
+```bash
+helm upgrade opensearch bitnami/opensearch \
+  --namespace opensearch \
+  --set mode=cluster \
+  --set master.replicaCount=3 \
+  --set data.replicaCount=2 \
+  --set coordinating.replicaCount=1
+```
+
+**Impact:** 6+ pods, ~8 GB+ RAM. Use only when search becomes a bottleneck — monitoring comes first.
+
+> **Rule of thumb:** Scale what you measure, not what you anticipate. Single-node is fine until you see Redis pod restarts causing 500s or OpenSearch queries timing out.
+
 ---
 
 ## Teardown
@@ -954,7 +1036,7 @@ This removes all Azure resources. The `terraform.tfvars` file is local only and 
 |-------|-----|
 | HTTPS LB rule used HTTP probe | Now uses separate HTTPS probe on port 443 |
 | K8s API / Rancher open to `*` | Restricted to `management_cidr` (defaults to SSH source) |
-| No remote state backend | Backend block ready for Azure Storage (edit `backend` block) |
+| No remote state backend | Commented `backend "azurerm"` block in all environments |
 | No `required_version` pin | Pinned to `~> 1.9` in `modules/common/versions.tf` |
 | VMs had no Azure identity | `identity { type = "SystemAssigned" }` on all VMs |
 | VMs used `count` (identity churn) | `for_each` with stable names (e.g., `server-0`, `agent-1`) |
@@ -963,6 +1045,14 @@ This removes all Azure resources. The `terraform.tfvars` file is local only and 
 | No Availability Zones | Servers distributed across zones 1/2/3 |
 | `.gitignore` only in README | Actual `.gitignore` file created |
 | Hardcoded managed DB | Now BYO-DB with opt-in Terraform modules |
+| `.terraform.lock.hcl` gitignored | Now tracked for reproducible provider versions |
+| `admin`/`admin` Rancher password | Randomly generated, saved to `rancher-bootstrap-password.txt` |
+| `nip.io` for Rancher hostname | Requires custom domain, no IP leakage |
+| Raw YAML for Redis/OpenSearch | All infrastructure installed via Helm |
+| `kubectl apply` for cert-manager | Pinned Helm chart (`v1.14.5`) with CRD management |
+| No `os_disk_type` variable | Parameterized (`Premium_LRS` / `Standard_LRS`) |
+| Longhorn on etcd nodes unmentioned | Documented architecture risk with mitigation |
+| No Redis/OpenSearch HA upgrade path | Documented `helm upgrade` commands for replication |
 
 ---
 

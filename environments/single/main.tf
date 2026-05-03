@@ -1,5 +1,19 @@
 terraform {
-  backend "local" {} # Override with Azure Storage backend for teams
+  # backend "local" {}  # Default: local state (fine for solo dev)
+  #
+  # For teams / production, switch to Azure Storage backend:
+  # 1. Create storage account first (separate from this template):
+  #    az group create --name tfstate-rg --location eastus
+  #    az storage account create --name tfstate<unique> --resource-group tfstate-rg --sku Standard_LRS
+  #    az storage container create --name tfstate --account-name tfstate<unique>
+  # 2. Uncomment and configure:
+  # backend "azurerm" {
+  #   resource_group_name  = "tfstate-rg"
+  #   storage_account_name = "tfstate<unique>"     # Globally unique, 3-24 chars, lowercase
+  #   container_name       = "tfstate"
+  #   key                  = "single.terraform.tfstate"
+  # }
+  backend "local" {}
 }
 
 module "common" {
